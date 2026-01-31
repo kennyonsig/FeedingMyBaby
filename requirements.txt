@@ -1,5 +1,5 @@
 # requirements.txt
-aiogram==2.25.1
+aiogram==3.0.0b7
 python-dotenv==1.0.0
 pytz==2023.3
 
@@ -16,4 +16,5 @@ pytz==2023.3
 # psycopg2-binary==2.9.7
 
 # Если используете requests для API запросов
+
 # requests==2.31.0
