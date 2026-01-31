@@ -12,8 +12,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import sqlite3
 import pytz
 import asyncio
-import tokens
-TOKEN = tokens.TOKEN_MAIN
+
+TOKEN = API_TOKEN
 
 load_dotenv()
 
@@ -2591,4 +2591,5 @@ async def main():
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+
     asyncio.run(main())
