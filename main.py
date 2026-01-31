@@ -13,14 +13,16 @@ import sqlite3
 import pytz
 import asyncio
 
-TOKEN = API_TOKEN
+
 
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-bot = Bot(token=TOKEN)
+API_TOKEN = os.getenv('API_TOKEN')
+bot = Bot(token=API_TOKEN)
+
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
@@ -2593,3 +2595,4 @@ async def main():
 if __name__ == "__main__":
 
     asyncio.run(main())
+
