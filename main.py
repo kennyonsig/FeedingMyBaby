@@ -1,35 +1,40 @@
 import os
 import logging
 from datetime import datetime, timedelta
-from typing import Optional, Tuple, List, Dict
-from dotenv import load_dotenv
+from typing import Optional, Dict, List, Any, Union
+from dataclasses import dataclass
+from contextlib import contextmanager
+import sqlite3
+import pytz
+import asyncio
+from enum import Enum
+
 from aiogram import Bot, Dispatcher, types, Router, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-import sqlite3
-import pytz
-import asyncio
+import tokens
 
-
-
-load_dotenv()
-
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-API_TOKEN = os.getenv('API_TOKEN')
-bot = Bot(token=API_TOKEN)
+# Конфигурация
+MOSCOW_TZ = pytz.timezone('Europe/Moscow')
+DB_NAME = 'baby_tracker.db'
+TOKEN = tokens.TOKEN_TEST
+
+# Инициализация бота
+bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
-
-MOSCOW_TZ = pytz.timezone('Europe/Moscow')
-
-# --- Классы состояний FSM ---
 class ChildRegistration(StatesGroup):
     waiting_for_first_name = State()
     waiting_for_last_name = State()
@@ -56,11 +61,6 @@ class DiaperTracking(StatesGroup):
 
 class NoteTaking(StatesGroup):
     waiting_for_note = State()
-    waiting_for_cancel = State()
-
-class MedicationTracking(StatesGroup):
-    waiting_for_med_name = State()
-    waiting_for_weight_for_med = State()
     waiting_for_cancel = State()
 
 class CustomFeedingAmount(StatesGroup):
@@ -157,7 +157,6 @@ class Database:
                 )
             ''')
             
-            # НОВАЯ ТАБЛИЦА: Отслеживание бодрствования
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS wakefulness_tracker (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,97 +191,9 @@ class Database:
                 )
             ''')
             
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS development_tips (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    age_min_days INTEGER NOT NULL,
-                    age_max_days INTEGER NOT NULL,
-                    category TEXT NOT NULL,
-                    tip_text TEXT NOT NULL,
-                    source TEXT
-                )
-            ''')
-            
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS vaccination_schedule (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    age_days INTEGER NOT NULL,
-                    vaccine_name TEXT NOT NULL,
-                    description TEXT,
-                    is_mandatory INTEGER DEFAULT 1
-                )
-            ''')
-            
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS daily_checklists (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    child_id INTEGER NOT NULL,
-                    date DATE NOT NULL,
-                    feeding_done INTEGER DEFAULT 0,
-                    diapers_changed INTEGER DEFAULT 0,
-                    sleep_adequate INTEGER DEFAULT 0,
-                    tummy_time INTEGER DEFAULT 0,
-                    bath_given INTEGER DEFAULT 0,
-                    medicines_given INTEGER DEFAULT 0,
-                    notes TEXT,
-                    FOREIGN KEY (child_id) REFERENCES children (id)
-                )
-            ''')
-            
             conn.commit()
-            self._seed_development_tips(conn)
-            self._seed_vaccination_schedule(conn)
         finally:
             conn.close()
-    
-    def _seed_development_tips(self, conn):
-        """Заполнить таблицу советами по развитию"""
-        cursor = conn.cursor()
-        
-        # Проверяем, есть ли уже данные
-        cursor.execute("SELECT COUNT(*) FROM development_tips")
-        if cursor.fetchone()[0] == 0:
-            tips = [
-                (0, 7, "Уход", "Чаще прикладывайте к груди, следите за мочеиспусканием (6-8 раз в сутки)", "ВОЗ"),
-                (0, 7, "Уход", "Поддерживайте температуру в комнате 22-24°C, влажность 40-60%", "Педиатрия"),
-                (0, 30, "Здоровье", "Ежедневно обрабатывайте пупочную ранку перекисью и зеленкой", "Минздрав"),
-                (0, 30, "Развитие", "Выкладывайте на животик на 1-2 минуты перед кормлением", "Развитие"),
-                (30, 60, "Развитие", "Показывайте контрастные картинки, игрушки на расстоянии 20-30 см", "Офтальмология"),
-                (60, 90, "Развитие", "Разговаривайте с ребенком, пойте песенки, включайте спокойную музыку", "Неврология"),
-                (90, 180, "Питание", "Если на ИВ, можно вводить прикорм с 4 месяцев, но лучше с 6", "Гастроэнтерология"),
-                (180, 270, "Развитие", "Давайте ребенку трогать разные текстуры: мягкие, шершавые, гладкие", "Сенсорика"),
-                (270, 365, "Развитие", "Играйте в прятки (ку-ку), стройте башни из кубиков", "Психология")
-            ]
-            cursor.executemany('''
-                INSERT INTO development_tips (age_min_days, age_max_days, category, tip_text, source)
-                VALUES (?, ?, ?, ?, ?)
-            ''', tips)
-            conn.commit()
-    
-    def _seed_vaccination_schedule(self, conn):
-        """Заполнить таблицу календаря прививок"""
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT COUNT(*) FROM vaccination_schedule")
-        if cursor.fetchone()[0] == 0:
-            vaccinations = [
-                (1, "Гепатит В", "Первая вакцинация", 1),
-                (30, "Гепатит В", "Вторая вакцинация (для группы риска)", 1),
-                (60, "Пневмококковая", "Первая вакцинация", 1),
-                (90, "АКДС", "Первая вакцинация (коклюш, дифтерия, столбняк)", 1),
-                (90, "Полиомиелит", "Первая вакцинация", 1),
-                (120, "АКДС", "Вторая вакцинация", 1),
-                (120, "Полиомиелит", "Вторая вакцинация", 1),
-                (150, "АКДС", "Третья вакцинация", 1),
-                (150, "Полиомиелит", "Третья вакцинация", 1),
-                (180, "Гепатит В", "Третья вакцинация", 1),
-                (365, "Корь, краснуха, паротит", "Первая вакцинация", 1)
-            ]
-            cursor.executemany('''
-                INSERT INTO vaccination_schedule (age_days, vaccine_name, description, is_mandatory)
-                VALUES (?, ?, ?, ?)
-            ''', vaccinations)
-            conn.commit()
     
     def get_child(self, chat_id: int) -> Optional[sqlite3.Row]:
         conn = self.get_connection()
@@ -321,7 +232,7 @@ class Database:
                 ('weight_height', 30)
             ]
             
-            today = datetime.now().date()
+            today = get_moscow_time().date()
             for reminder_type, frequency in reminders:
                 cursor.execute('''
                     INSERT INTO reminders 
@@ -348,19 +259,19 @@ class Database:
                 birth_date_str = row[0]
                 if isinstance(birth_date_str, str):
                     birth_date = datetime.strptime(birth_date_str, '%Y-%m-%d').date()
-                    age_days = (datetime.now().date() - birth_date).days
-                    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    age_days = (get_moscow_time().date() - birth_date).days
+                    current_time = get_moscow_time()
                     
                     cursor.execute('''
                         INSERT INTO measurements (child_id, weight, height, measurement_date, age_days, recorded_at)
                         VALUES (?, ?, ?, ?, ?, ?)
-                    ''', (child_id, weight, height, datetime.now().date(), age_days, current_time))
+                    ''', (child_id, weight, height, get_moscow_time().date(), age_days, current_time))
                     
                     cursor.execute('''
                         UPDATE reminders 
                         SET next_reminder = date(?, '+' || frequency_days || ' days')
                         WHERE child_id = ? AND reminder_type = 'weight_height' AND is_active = 1
-                    ''', (datetime.now().strftime('%Y-%m-%d'), child_id))
+                    ''', (get_moscow_time().strftime('%Y-%m-%d'), child_id))
             
             conn.commit()
         except Exception as e:
@@ -392,7 +303,7 @@ class Database:
             cursor.execute('''
                 INSERT INTO sleep_tracker (child_id, sleep_start)
                 VALUES (?, ?)
-            ''', (child_id, datetime.now()))
+            ''', (child_id, get_moscow_time()))
             conn.commit()
             return cursor.lastrowid
         except Exception as e:
@@ -409,7 +320,7 @@ class Database:
             row = cursor.fetchone()
             if row:
                 sleep_start = datetime.fromisoformat(row[0])
-                sleep_end = datetime.now()
+                sleep_end = get_moscow_time()
                 duration = int((sleep_end - sleep_start).total_seconds() / 60)
                 
                 cursor.execute('''
@@ -443,6 +354,7 @@ class Database:
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
+            today_str = get_moscow_time().strftime('%Y-%m-%d')
             cursor.execute('''
                 SELECT 
                     COUNT(*) as sleep_count,
@@ -450,14 +362,14 @@ class Database:
                     AVG(duration_minutes) as avg_minutes
                 FROM sleep_tracker 
                 WHERE child_id = ? 
-                AND DATE(sleep_start) = DATE('now')
+                AND DATE(sleep_start) = ?
                 AND sleep_end IS NOT NULL
-            ''', (child_id,))
+            ''', (child_id, today_str))
             return cursor.fetchone()
         finally:
             conn.close()
     
-    # --- НОВЫЕ МЕТОДЫ: Отслеживание бодрствования ---
+    # --- Методы для бодрствования ---
     
     def start_wakefulness(self, child_id: int) -> int:
         conn = self.get_connection()
@@ -466,7 +378,7 @@ class Database:
             cursor.execute('''
                 INSERT INTO wakefulness_tracker (child_id, wake_start)
                 VALUES (?, ?)
-            ''', (child_id, datetime.now()))
+            ''', (child_id, get_moscow_time()))
             conn.commit()
             return cursor.lastrowid
         except Exception as e:
@@ -483,7 +395,7 @@ class Database:
             row = cursor.fetchone()
             if row:
                 wake_start = datetime.fromisoformat(row[0])
-                wake_end = datetime.now()
+                wake_end = get_moscow_time()
                 duration = int((wake_end - wake_start).total_seconds() / 60)
                 
                 cursor.execute('''
@@ -517,6 +429,7 @@ class Database:
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
+            today_str = get_moscow_time().strftime('%Y-%m-%d')
             cursor.execute('''
                 SELECT 
                     COUNT(*) as wake_count,
@@ -524,9 +437,9 @@ class Database:
                     AVG(duration_minutes) as avg_minutes
                 FROM wakefulness_tracker 
                 WHERE child_id = ? 
-                AND DATE(wake_start) = DATE('now')
+                AND DATE(wake_start) = ?
                 AND wake_end IS NOT NULL
-            ''', (child_id,))
+            ''', (child_id, today_str))
             return cursor.fetchone()
         finally:
             conn.close()
@@ -536,9 +449,9 @@ class Database:
         try:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO diaper_tracker (child_id, type)
-                VALUES (?, ?)
-            ''', (child_id, diaper_type))
+                INSERT INTO diaper_tracker (child_id, type, timestamp)
+                VALUES (?, ?, ?)
+            ''', (child_id, diaper_type, get_moscow_time()))
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -550,6 +463,7 @@ class Database:
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
+            today_str = get_moscow_time().strftime('%Y-%m-%d')
             cursor.execute('''
                 SELECT 
                     type,
@@ -557,9 +471,9 @@ class Database:
                     COUNT(CASE WHEN time(timestamp) > time('now', '-3 hours') THEN 1 END) as recent_count
                 FROM diaper_tracker 
                 WHERE child_id = ? 
-                AND DATE(timestamp) = DATE('now')
+                AND DATE(timestamp) = ?
                 GROUP BY type
-            ''', (child_id,))
+            ''', (child_id, today_str))
             return cursor.fetchall()
         finally:
             conn.close()
@@ -569,9 +483,9 @@ class Database:
         try:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO journal_notes (child_id, note, category)
-                VALUES (?, ?, ?)
-            ''', (child_id, note, category))
+                INSERT INTO journal_notes (child_id, note, category, created_at)
+                VALUES (?, ?, ?, ?)
+            ''', (child_id, note, category, get_moscow_time()))
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -593,77 +507,46 @@ class Database:
         finally:
             conn.close()
     
-    def get_development_tips(self, age_days: int):
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT * FROM development_tips 
-                WHERE age_min_days <= ? AND age_max_days >= ?
-                ORDER BY age_min_days
-            ''', (age_days, age_days))
-            return cursor.fetchall()
-        finally:
-            conn.close()
+    # --- Методы для кормлений ---
     
-    def get_vaccination_schedule(self, age_days: int, limit: int = 3):
+    def get_daily_feeding_stats(self, child_id: int):
+        """Возвращает количество кормлений и суммарный объём за сегодня (по МСК)"""
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
+            today_str = get_moscow_time().strftime('%Y-%m-%d')
             cursor.execute('''
-                SELECT * FROM vaccination_schedule 
-                WHERE age_days >= ?
-                ORDER BY age_days ASC
-                LIMIT ?
-            ''', (age_days, limit))
-            return cursor.fetchall()
-        finally:
-            conn.close()
-    
-    def update_daily_checklist(self, child_id: int, date: str, field: str, value: int = 1):
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            
-            # Проверяем, есть ли запись на сегодня
-            cursor.execute('SELECT id FROM daily_checklists WHERE child_id = ? AND date = ?', (child_id, date))
-            row = cursor.fetchone()
-            
-            if row:
-                # Обновляем существующую запись
-                cursor.execute(f'''
-                    UPDATE daily_checklists 
-                    SET {field} = ?
-                    WHERE id = ?
-                ''', (value, row[0]))
-            else:
-                # Создаем новую запись
-                cursor.execute(f'''
-                    INSERT INTO daily_checklists (child_id, date, {field})
-                    VALUES (?, ?, ?)
-                ''', (child_id, date, value))
-            
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            raise e
-        finally:
-            conn.close()
-    
-    def get_today_checklist(self, child_id: int):
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            today = datetime.now().strftime('%Y-%m-%d')
-            cursor.execute('''
-                SELECT * FROM daily_checklists 
-                WHERE child_id = ? AND date = ?
-            ''', (child_id, today))
+                SELECT 
+                    COUNT(*) as feedings_count,
+                    COALESCE(SUM(total_eaten_ml), 0) as total_ml
+                FROM feedings 
+                WHERE child_id = ? 
+                AND DATE(start_time) = ?
+            ''', (child_id, today_str))
             return cursor.fetchone()
         finally:
             conn.close()
-    
-    # --- Существующие методы для кормлений ---
+
+    def get_today_feedings(self, child_id: int):
+        """Возвращает список кормлений за сегодня с временем и объёмом"""
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            today_str = get_moscow_time().strftime('%Y-%m-%d')
+            cursor.execute('''
+                SELECT 
+                    time(start_time) as start_time,
+                    time(end_time) as end_time,
+                    total_eaten_ml
+                FROM feedings 
+                WHERE child_id = ? 
+                AND DATE(start_time) = ?
+                AND end_time IS NOT NULL
+                ORDER BY start_time ASC
+            ''', (child_id, today_str))
+            return cursor.fetchall()
+        finally:
+            conn.close()
     
     def start_feeding(self, chat_id: int, child_id: int) -> int:
         conn = self.get_connection()
@@ -672,7 +555,7 @@ class Database:
             cursor.execute('''
                 INSERT INTO feedings (chat_id, child_id, start_time)
                 VALUES (?, ?, ?)
-            ''', (chat_id, child_id, datetime.now()))
+            ''', (chat_id, child_id, get_moscow_time()))
             conn.commit()
             return cursor.lastrowid
         except Exception as e:
@@ -690,51 +573,6 @@ class Database:
                 SET prepared_ml = ?
                 WHERE id = ?
             ''', (prepared_ml, feeding_id))
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            raise e
-        finally:
-            conn.close()
-    
-    def pause_feeding(self, feeding_id: int):
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE feedings 
-                SET is_paused = 1, 
-                    paused_at = ?,
-                    pauses_count = pauses_count + 1
-                WHERE id = ?
-            ''', (datetime.now(), feeding_id))
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            raise e
-        finally:
-            conn.close()
-    
-    def resume_feeding(self, feeding_id: int):
-        conn = self.get_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute('SELECT paused_at FROM feedings WHERE id = ?', (feeding_id,))
-            row = cursor.fetchone()
-            if row and row[0]:
-                paused_at_str = row[0]
-                if paused_at_str:
-                    paused_at = datetime.fromisoformat(paused_at_str)
-                    pause_duration = int((datetime.now() - paused_at).total_seconds())
-                    
-                    cursor.execute('''
-                        UPDATE feedings 
-                        SET is_paused = 0, 
-                            paused_at = NULL,
-                            total_pause_duration = total_pause_duration + ?
-                        WHERE id = ?
-                    ''', (pause_duration, feeding_id))
-            
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -766,7 +604,7 @@ class Database:
                 UPDATE feedings 
                 SET end_time = ?
                 WHERE id = ?
-            ''', (datetime.now(), feeding_id))
+            ''', (get_moscow_time(), feeding_id))
             conn.commit()
         except Exception as e:
             conn.rollback()
@@ -827,7 +665,8 @@ active_feedings = {}
 
 # --- Вспомогательные функции ---
 def get_moscow_time() -> datetime:
-    return datetime.now(MOSCOW_TZ)
+    """Возвращает наивное (без часового пояса) московское время"""
+    return datetime.now(MOSCOW_TZ).replace(tzinfo=None)
 
 def format_duration(seconds: int) -> str:
     hours = seconds // 3600
@@ -837,7 +676,7 @@ def format_duration(seconds: int) -> str:
     return f"{minutes}мин"
 
 def calculate_age(birth_date: datetime) -> Tuple[int, int, int]:
-    today = datetime.now().date()
+    today = get_moscow_time().date()
     birth = birth_date.date()
     
     years = today.year - birth.year
@@ -862,29 +701,6 @@ def calculate_age(birth_date: datetime) -> Tuple[int, int, int]:
     
     return years, months, days
 
-def get_daily_checklist_items() -> Dict[str, List[str]]:
-    """Возвращает чек-лист для молодых родителей"""
-    return {
-        "Обязательно": [
-            "✓ Проверить температуру (36.6-37.2°C)",
-            "✓ Сменить подгузник (8-12 раз в сутки)",
-            "✓ Умыть личико, прочистить носик",
-            "✓ Проверить кожу на опрелости"
-        ],
-        "Для новорожденных (0-30 дней)": [
-            "✓ Обработать пупочную ранку",
-            "✓ Сделать массаж животика по часовой стрелке",
-            "✓ Выложить на животик на 2-3 минуты",
-            "✓ Обработать кожные складочки"
-        ],
-        "Для грудничков (1-6 месяцев)": [
-            "✓ Гимнастика 5-10 минут",
-            "✓ Прогулка на свежем воздухе 1-2 часа",
-            "✓ Купание вечером",
-            "✓ Игры для развития моторики"
-        ]
-    }
-
 def calculate_formula(weight_kg: float, age_days: int) -> Dict:
     """Рассчитать суточный объем смеси"""
     if age_days <= 10:
@@ -902,86 +718,6 @@ def calculate_formula(weight_kg: float, age_days: int) -> Dict:
         "per_feeding": round(per_feeding),
         "feedings": feedings_per_day
     }
-
-def get_emergency_info() -> str:
-    """Информация для экстренных случаев"""
-    return """🚨 ЭКСТРЕННАЯ ПОМОЩЬ 🚨
-
-📞 Телефоны:
-• 103 - Скорая помощь
-• 112 - Единый номер экстренных служб
-• 8-800-200-0-200 - Горячая линия Минздрава
-
-⚠️ Когда срочно к врачу:
-• Температура выше 38°C у детей до 3 месяцев
-• Отказ от еди более 6 часов
-• Рвота или понос более 3 раз за час
-• Сыпь с температурой
-• Затрудненное дыхание, синюшность
-• Вялость, отсутствие реакции
-• Судороги
-• Кровь в стуле или рвоте
-
-💊 Аптечка для новорожденного:
-• Жаропонижающее (парацетамол, ибупрофен)
-• Солевой раствор для носа
-• Антисептик (хлоргексидин)
-• Градусник электронный
-• Аспиратор назальный
-• Вазелиновое масло
-• Детский крем от опрелостей
-• Ватные диски и палочки с ограничителем
-
-🏥 Что делать до приезда врача:
-1. Сохраняйте спокойствие
-2. Измерьте температуру
-3. Проверьте дыхание
-4. Уложите ребенка на бок
-5. Соберите документы (полис, СНИЛС)
-6. Запишите время начала симптомов"""
-
-def get_development_activities(age_months: int) -> str:
-    """Игры и занятия по возрасту"""
-    activities = {
-        0: "🎯 0-1 месяц: Контрастные картинки (черно-белые), нежные прикосновения, колыбельные, легкий массаб",
-        1: "🪀 1-3 месяца: Погремушки, мобиль над кроваткой, безопасное зеркальце, разные текстуры для ощупывания",
-        3: "🧸 3-6 месяцев: Развивающий коврик, тканевые книжки, прорезыватели, музыкальные игрушки",
-        6: "🏗️ 6-9 месяцев: Пирамидки, сортеры, мячики, кубики, игрушки-каталки, пальчиковые краски",
-        9: "📚 9-12 месяцев: Книжки с картинками, матрешки, конструкторы с крупными деталями, кукольный театр"
-    }
-    
-    age_key = max(k for k in activities.keys() if k <= age_months)
-    return activities[age_key]
-
-def calculate_medication_dose(weight_kg: float, medication: str) -> str:
-    """Рассчитать дозе лекарства по весу"""
-    doses = {
-        "Парацетамол": {
-            "single_dose": weight_kg * 15,  # мг
-            "max_daily": weight_kg * 60,  # мг
-            "interval_hours": 6,
-            "form": "суспензия"
-        },
-        "Ибупрофен": {
-            "single_dose": weight_kg * 10,  # мг
-            "max_daily": weight_kg * 30,  # мг
-            "interval_hours": 8,
-            "form": "суспензия"
-        }
-    }
-    
-    if medication in doses:
-        dose = doses[medication]
-        return f"""💊 {medication} ({dose['form']}):
-
-• Разовая доза: {dose['single_dose']:.0f} мг ({round(dose['single_dose']/100, 1)} мл, если 100 мг/5 мл)
-• Максимум в сутки: {dose['max_daily']:.0f} мг
-• Интервал: не менее {dose['interval_hours']} часов
-• Курс: не более 3 дней без назначения врача
-
-⚠️ Противопоказания: аллергия, тяжелые заболевания печени/почек"""
-    
-    return f"Препарат '{medication}' не найден в базе. Проконсультируйтесь с врачом."
 
 # --- Клавиатуры ---
 def get_main_menu_keyboard() -> types.InlineKeyboardMarkup:
@@ -1002,22 +738,11 @@ def get_main_menu_keyboard() -> types.InlineKeyboardMarkup:
             types.InlineKeyboardButton(text="🩲 Подгузник", callback_data="diaper_menu"),
             types.InlineKeyboardButton(text="📝 Заметка", callback_data="note_menu")
         ],
-        # Раздел 4: Здоровье и развитие
-        [
-            types.InlineKeyboardButton(text="💊 Лекарства", callback_data="medication_menu"),
-            types.InlineKeyboardButton(text="🗓️ Советы", callback_data="tips_menu")
-        ],
-        # Раздел 5: Статистика и помощь
+        # Раздел 4: Статистика и помощь
         [
             types.InlineKeyboardButton(text="📈 Статистика", callback_data="show_stats"),
-            types.InlineKeyboardButton(text="🚨 Помощь", callback_data="emergency_help")
         ],
-        # Раздел 6: Дополнительные функции
-        [
-            types.InlineKeyboardButton(text="✅ Чек-лист", callback_data="checklist_menu"),
-            types.InlineKeyboardButton(text="🎮 Игры", callback_data="games_menu")
-        ],
-        # Раздел 7: Технические функции
+        # Раздел 5: Технические функции
         [
             types.InlineKeyboardButton(text="🔄 Сбросить активное кормление", callback_data="reset_active_feeding")
         ]
@@ -1025,9 +750,9 @@ def get_main_menu_keyboard() -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def get_feeding_control_keyboard() -> types.InlineKeyboardMarkup:
-    """Клавиатура управления кормлением с разделами"""
+    """Клавиатура управления кормлением (без паузы/продолжения)"""
     keyboard = [
-        # Раздел: Добавление еды (добавлена кнопка 5 мл)
+        # Раздел: Добавление еды
         [
             types.InlineKeyboardButton(text="➕ 5 мл", callback_data="add_5"),
             types.InlineKeyboardButton(text="➕ 10 мл", callback_data="add_10"),
@@ -1042,28 +767,10 @@ def get_feeding_control_keyboard() -> types.InlineKeyboardMarkup:
         [
             types.InlineKeyboardButton(text="📝 Ввести своё количество", callback_data="add_custom")
         ],
-        # Раздел: Управление
-        [
-            types.InlineKeyboardButton(text="⏸️ Пауза", callback_data="pause_feeding"),
-            types.InlineKeyboardButton(text="▶️ Продолжить", callback_data="resume_feeding")
-        ],
         # Раздел: Завершение
         [
             types.InlineKeyboardButton(text="✅ Завершить", callback_data="finish_feeding"),
             types.InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_feeding")
-        ],
-        [
-            types.InlineKeyboardButton(text="🔙 В главное меню", callback_data="main_menu")
-        ]
-    ]
-    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-def get_paused_feeding_keyboard() -> types.InlineKeyboardMarkup:
-    """Клавиатура для приостановленного кормления"""
-    keyboard = [
-        [
-            types.InlineKeyboardButton(text="▶️ Продолжить", callback_data="resume_feeding"),
-            types.InlineKeyboardButton(text="✅ Завершить", callback_data="finish_feeding")
         ],
         [
             types.InlineKeyboardButton(text="🔙 В главное меню", callback_data="main_menu")
@@ -1197,7 +904,7 @@ async def sleep_menu_callback(callback: CallbackQuery):
     await callback.message.edit_text(
         f"💤 Отслеживание сна и бодрствования\n\n"
         f"👶 Ребенок: {child['first_name']}\n"
-        f"📅 Дата: {datetime.now().strftime('%d.%m.%Y')}\n\n"
+        f"📅 Дата: {get_moscow_time().strftime('%d.%m.%Y')}\n\n"
         "Выберите действие:",
         reply_markup=get_sleep_menu_keyboard()
     )
@@ -1223,7 +930,7 @@ async def start_sleep_callback(callback: CallbackQuery):
     
     sleep_id = db.start_sleep(child['id'])
     
-    current_time = datetime.now().strftime("%H:%M")
+    current_time = get_moscow_time().strftime("%H:%M")
     await callback.message.edit_text(
         f"🛏️ Сон начат в {current_time}\n"
         f"👶 Для: {child['first_name']}\n\n"
@@ -1248,7 +955,7 @@ async def end_sleep_callback(callback: CallbackQuery):
     db.end_sleep(active_sleep['id'])
     
     sleep_start = datetime.fromisoformat(active_sleep['sleep_start'])
-    sleep_end = datetime.now()
+    sleep_end = get_moscow_time()
     duration = int((sleep_end - sleep_start).total_seconds() / 60)
     
     hours = duration // 60
@@ -1283,13 +990,13 @@ async def sleep_stats_callback(callback: CallbackQuery):
         
         text = f"📊 Статистика сна за сегодня:\n\n"
         text += f"👶 Ребенок: {child['first_name']}\n"
-        text += f"📅 Дата: {datetime.now().strftime('%d.%m.%Y')}\n"
+        text += f"📅 Дата: {get_moscow_time().strftime('%d.%m.%Y')}\n"
         text += f"🛏️ Количество снов: {stats['sleep_count']}\n"
         text += f"⏱️ Общее время сна: {total_hours}ч {total_minutes}мин\n"
         text += f"📈 Средняя длительность: {avg_hours}ч {avg_minutes}мин\n\n"
         
         # Рекомендации
-        age_days = (datetime.now().date() - datetime.strptime(child['birth_date'], "%Y-%m-%d").date()).days
+        age_days = (get_moscow_time().date() - datetime.strptime(child['birth_date'], "%Y-%m-%d").date()).days
         if age_days <= 90:
             text += "💡 Рекомендация: Новорожденным нужно 14-17 часов сна в сутки"
         elif age_days <= 180:
@@ -1319,7 +1026,7 @@ async def wake_menu_callback(callback: CallbackQuery):
     await callback.message.edit_text(
         f"🌞 Отслеживание бодрствования\n\n"
         f"👶 Ребенок: {child['first_name']}\n"
-        f"📅 Дата: {datetime.now().strftime('%d.%m.%Y')}\n\n"
+        f"📅 Дата: {get_moscow_time().strftime('%d.%m.%Y')}\n\n"
         "Выберите действие:",
         reply_markup=get_wake_menu_keyboard()
     )
@@ -1345,7 +1052,7 @@ async def start_wake_callback(callback: CallbackQuery):
     
     wake_id = db.start_wakefulness(child['id'])
     
-    current_time = datetime.now().strftime("%H:%M")
+    current_time = get_moscow_time().strftime("%H:%M")
     await callback.message.edit_text(
         f"🌞 Бодрствование начато в {current_time}\n"
         f"👶 Для: {child['first_name']}\n\n"
@@ -1370,14 +1077,14 @@ async def end_wake_callback(callback: CallbackQuery):
     db.end_wakefulness(active_wake['id'])
     
     wake_start = datetime.fromisoformat(active_wake['wake_start'])
-    wake_end = datetime.now()
+    wake_end = get_moscow_time()
     duration = int((wake_end - wake_start).total_seconds() / 60)
     
     hours = duration // 60
     minutes = duration % 60
     
     # Рекомендации по времени бодрствования по возрасту
-    age_days = (datetime.now().date() - datetime.strptime(child['birth_date'], "%Y-%m-%d").date()).days
+    age_days = (get_moscow_time().date() - datetime.strptime(child['birth_date'], "%Y-%m-%d").date()).days
     
     if age_days <= 30:
         recommended_wake = "1-2 часа"
@@ -1417,13 +1124,13 @@ async def wake_stats_callback(callback: CallbackQuery):
         
         text = f"📊 Статистика бодрствования за сегодня:\n\n"
         text += f"👶 Ребенок: {child['first_name']}\n"
-        text += f"📅 Дата: {datetime.now().strftime('%d.%m.%Y')}\n"
+        text += f"📅 Дата: {get_moscow_time().strftime('%d.%m.%Y')}\n"
         text += f"🌞 Количество периодов бодрствования: {stats['wake_count']}\n"
         text += f"⏱️ Общее время бодрствования: {total_hours}ч {total_minutes}мин\n"
         text += f"📈 Средняя длительность: {avg_hours}ч {avg_minutes}мин\n\n"
         
         # Рассчитываем возраст для рекомендаций
-        age_days = (datetime.now().date() - datetime.strptime(child['birth_date'], "%Y-%m-%d").date()).days
+        age_days = (get_moscow_time().date() - datetime.strptime(child['birth_date'], "%Y-%m-%d").date()).days
         
         if age_days <= 30:
             recommended_wake = "1-2 часа"
@@ -1469,7 +1176,7 @@ async def diaper_menu_callback(callback: CallbackQuery):
     await callback.message.edit_text(
         f"🩲 Отслеживание подгузников\n\n"
         f"👶 Ребенок: {child['first_name']}\n"
-        f"📅 Дата: {datetime.now().strftime('%d.%m.%Y')}\n\n"
+        f"📅 Дата: {get_moscow_time().strftime('%d.%m.%Y')}\n\n"
         "Выберите тип:",
         reply_markup=get_diaper_menu_keyboard()
     )
@@ -1492,15 +1199,11 @@ async def process_diaper_callback(callback: CallbackQuery):
     diaper_type = diaper_type_map[callback.data]
     db.add_diaper(child['id'], diaper_type)
     
-    # Обновляем чек-лист
-    today = datetime.now().strftime('%Y-%m-%d')
-    db.update_daily_checklist(child['id'], today, "diapers_changed")
-    
-    current_time = datetime.now().strftime("%H:%M")
+    current_time = get_moscow_time().strftime("%H:%M")
     
     text = f"✅ Подгузник отмечен!\n\n"
     text += f"👶 Ребенок: {child['first_name']}\n"
-    text += f"📅 Дата: {datetime.now().strftime('%d.%m.%Y')}\n"
+    text += f"📅 Дата: {get_moscow_time().strftime('%d.%m.%Y')}\n"
     text += f"⏰ Время: {current_time}\n"
     text += f"🩲 Тип: {diaper_type}\n\n"
     
@@ -1530,7 +1233,7 @@ async def diaper_stats_callback(callback: CallbackQuery):
     
     text = f"📊 Статистика подгузников за сегодня:\n\n"
     text += f"👶 Ребенок: {child['first_name']}\n"
-    text += f"📅 Дата: {datetime.now().strftime('%d.%m.%Y')}\n\n"
+    text += f"📅 Дата: {get_moscow_time().strftime('%d.%m.%Y')}\n\n"
     
     if stats:
         for row in stats:
@@ -1575,7 +1278,7 @@ async def note_menu_callback(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         f"📝 Журнал заметок\n\n"
         f"👶 Ребенок: {child['first_name']}\n"
-        f"📅 Дата: {datetime.now().strftime('%d.%m.%Y')}\n\n"
+        f"📅 Дата: {get_moscow_time().strftime('%d.%m.%Y')}\n\n"
         "Введите заметку (температура, настроение, особенности поведения, питание и т.д.):\n\n"
         "Для отмены нажмите ❌ Отмена",
         reply_markup=get_cancel_keyboard()
@@ -1609,266 +1312,349 @@ async def save_note(message: Message, state: FSMContext):
     await message.answer("🏠 Главное меню\nВыберите раздел:", reply_markup=get_main_menu_keyboard())
     await state.clear()
 
-# --- Обработчики советов ---
-@router.callback_query(F.data == "tips_menu")
-async def tips_menu_callback(callback: CallbackQuery):
-    """Меню советов"""
-    child = db.get_child(callback.message.chat.id)
-    if not child:
-        await callback.answer("Сначала зарегистрируйте ребенка с помощью /register", show_alert=True)
-        return
-    
-    # Рассчитываем возраст
-    birth_date = datetime.strptime(child['birth_date'], "%Y-%m-%d")
-    age_days = (datetime.now().date() - birth_date.date()).days
-    age_months = age_days // 30
-    
-    # Получаем советы из БД
-    tips = db.get_development_tips(age_days)
-    
-    text = f"🗓️ Советы по развитию\n\n"
-    text += f"👶 Ребенок: {child['first_name']}\n"
-    text += f"📅 Возраст: {age_days} дней ({age_months} месяцев)\n\n"
-    
-    if tips:
-        text += "📚 Рекомендации:\n"
-        for tip in tips:
-            text += f"• {tip['tip_text']}\n"
-            if tip['source']:
-                text += f"  *Источник: {tip['source']}*\n"
-        text += "\n"
-    else:
-        text += "Для этого возраста пока нет специальных советов.\n"
-        text += "Ребенок развивается индивидуально - следуйте рекомендациям педиатра.\n\n"
-    
-    # Добавляем календарь прививок
-    vaccinations = db.get_vaccination_schedule(age_days, 3)
-    if vaccinations:
-        text += "💉 Ближайшие прививки:\n"
-        for vax in vaccinations:
-            days_left = vax['age_days'] - age_days
-            if days_left > 0:
-                text += f"• Через {days_left} дней: {vax['vaccine_name']}\n"
-                if vax['description']:
-                    text += f"  {vax['description']}\n"
-    
-    # Добавляем игры по возрасту
-    activities = get_development_activities(age_months)
-    text += f"\n🎮 Игры и занятия:\n{activities}"
-    
-    await callback.message.edit_text(
-        text,
-        reply_markup=types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [types.InlineKeyboardButton(text="🔙 В главное меню", callback_data="main_menu")]
-            ]
-        )
-    )
-    await callback.answer()
+# --- Заглушка для неиспользуемых callback-данных ---
+@router.callback_query(F.data.in_([
+    "temp_tracking", "vaccination_info", "doctor_visit", "medical_record",
+    "general_stats", "feeding_stats", "weight_chart", "height_chart", 
+    "monthly_report", "daily_report", "sleep_history"
+]))
+async def placeholder_callback(callback: CallbackQuery):
+    """Заглушка для пока не реализованных функций"""
+    await callback.answer("Эта функция скоро будет доступна! ⏳", show_alert=True)
 
-# --- Обработчики чек-листа ---
-@router.callback_query(F.data == "checklist_menu")
-async def checklist_menu_callback(callback: CallbackQuery):
-    """Меню чек-листа"""
-    child = db.get_child(callback.message.chat.id)
-    if not child:
-        await callback.answer("Сначала зарегистрируйте ребенка с помощью /register", show_alert=True)
-        return
+# --- Команды бота (обновлённые) ---
+@router.message(CommandStart())
+async def start_cmd(message: Message):
+    child = db.get_child(message.chat.id)
     
-    today = datetime.now().strftime('%Y-%m-%d')
-    checklist = db.get_today_checklist(child['id'])
+    text = "👶 Бот для отслеживания развития ребенка!\n\n"
     
-    # Рассчитываем возраст
-    birth_date = datetime.strptime(child['birth_date'], "%Y-%m-%d")
-    age_days = (datetime.now().date() - birth_date.date()).days
-    
-    text = f"✅ Ежедневный чек-лист\n\n"
-    text += f"👶 Ребенок: {child['first_name']}\n"
-    text += f"📅 Дата: {datetime.now().strftime('%d.%m.%Y')}\n"
-    text += f"🎂 Возраст: {age_days} дней\n\n"
-    
-    # Общий чек-лист
-    checklist_items = get_daily_checklist_items()
-    
-    for category, items in checklist_items.items():
-        text += f"{category}:\n"
-        for item in items:
-            text += f"{item}\n"
-        text += "\n"
-    
-    # Статус выполненных задач
-    if checklist:
-        text += "📋 Выполнено сегодня:\n"
-        if checklist['feeding_done']:
-            text += "✅ Кормления\n"
-        if checklist['diapers_changed']:
-            text += "✅ Смена подгузников\n"
-        if checklist['sleep_adequate']:
-            text += "✅ Достаточный сон\n"
-        if checklist['tummy_time']:
-            text += "✅ Время на животике\n"
-        if checklist['bath_given']:
-            text += "✅ Купание\n"
-        if checklist['medicines_given']:
-            text += "✅ Лекарства\n"
-    
-    # Калькулятор смеси для ИВ
-    last_measurement = db.get_last_measurement(child['id'])
-    if last_measurement:
-        weight_kg = last_measurement['weight'] / 1000
-        formula_calc = calculate_formula(weight_kg, age_days)
+    if child:
+        years, months, days = calculate_age(datetime.strptime(child['birth_date'], "%Y-%m-%d"))
+        text += f"👶 Ребенок: {child['first_name']} {child['last_name'] if child['last_name'] else ''}\n"
+        text += f"📅 Дата рождения: {child['birth_date']}\n"
+        text += f"🎂 Возраст: {years} лет, {months} месяцев, {days} дней\n\n"
         
-        text += f"\n🍼 Расчет смеси (если на ИВ):\n"
-        text += f"• Суточный объем: {formula_calc['total_ml']} мл\n"
-        text += f"• За одно кормление: {formula_calc['per_feeding']} мл\n"
-        text += f"• Количество кормлений: {formula_calc['feedings']}\n"
-    
-    text += "\n💡 Совет: Отмечайте выполненные задачи в соответствующих разделах бота"
-    
-    await callback.message.edit_text(
+    await message.answer(
         text,
-        parse_mode="Markdown",
-        reply_markup=types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [types.InlineKeyboardButton(text="🔙 В главное меню", callback_data="main_menu")]
-            ]
-        )
+        parse_mode="Markdown"
     )
-    await callback.answer()
+    
+    await message.answer(
+        "🏠 Главное меню\nВыберите раздел:",
+        reply_markup=get_main_menu_keyboard()
+    )
 
-# --- Обработчики игр ---
-@router.callback_query(F.data == "games_menu")
-async def games_menu_callback(callback: CallbackQuery):
-    """Меню игр"""
-    child = db.get_child(callback.message.chat.id)
+@router.message(Command("menu"))
+async def menu_cmd(message: Message):
+    """Команда для вызова главного меню"""
+    await message.answer(
+        "🏠 Главное меню\nВыберите раздел:",
+        reply_markup=get_main_menu_keyboard()
+    )
+
+@router.message(Command("help"))
+async def help_cmd(message: Message):
+    help_text = """📋 Доступные команды и функции:
+
+Основные:
+/start - Главное меню
+/register - Регистрация ребенка
+/child_info - Информация о ребенке
+/params - Внести параметры роста/веса
+/stats - Статистика развития
+/menu - Главное меню (inline)
+/help - Справка
+
+Функции для родителей:
+• 💤 Сон - Трекер сна
+• 🌞 Бодрствование - Трекер времени бодрствования
+• 🩲 Подгузник - Трекер смены подгузников
+• 📝 Заметка - Журнал для записей
+
+Для кормлений:
+/feeding - Начать кормление
+/add_eaten [количество] - Добавить съеденное (например: /add_eaten 50)
+/finish - Завершить кормление
+/reset_feeding - Сбросить активное кормление (при багах)
+
+Для отмены ввода:
+/cancel - Отмена текущего действия"""
+    
+    await message.answer(help_text)
+
+# --- Обработчики команд кормления ---
+@router.message(Command("feeding"))
+async def feeding_cmd(message: Message):
+    """Команда для начала кормления"""
+    chat_id = message.chat.id
+    child = db.get_child(chat_id)
+    
     if not child:
-        await callback.answer("Сначала зарегистрируйте ребенка с помощью /register", show_alert=True)
+        await message.answer("Сначала зарегистрируйте ребенка с помощью /register")
         return
     
-    # Рассчитываем возраст
-    birth_date = datetime.strptime(child['birth_date'], "%Y-%m-%d")
-    age_days = (datetime.now().date() - birth_date.date()).days
-    age_months = age_days // 30
-    
-    activities = get_development_activities(age_months)
-    
-    text = f"🎮 Развивающие игры и занятия\n\n"
-    text += f"👶 Ребенок: {child['first_name']}\n"
-    text += f"📅 Возраст: {age_months} месяцев ({age_days} дней)\n\n"
-    
-    text += activities
-    
-    text += "\n\n🎯 Общие принципы развития:\n"
-    text += "1. Безопасность - все игрушки без мелких деталей\n"
-    text += "2. Регулярность - занимайтесь по 5-10 минут несколько раз в день\n"
-    text += "3. Наблюдение - следите за реакцией ребенка\n"
-    text += "4. Разнообразие - меняйте виды деятельности\n"
-    text += "5. Радость - обучение через игру должно приносить удовольствие\n\n"
-    
-    text += "📚 Полезные материалы:\n"
-    text += "• Книги с крупными картинками\n"
-    text += "• Музыкальные инструменты (бубен, маракасы)\n"
-    text += "• Сенсорные коробки (крупы, вода, песок)\n"
-    text += "• Конструкторы с крупными деталями\n"
-    text += "• Пальчиковые краски (с 6 месяцев)"
-    
-    await callback.message.edit_text(
-        text,
-        reply_markup=types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [types.InlineKeyboardButton(text="🔙 В главное меню", callback_data="main_menu")]
-            ]
-        )
-    )
-    await callback.answer()
-
-# --- Обработчики лекарств ---
-@router.callback_query(F.data == "medication_menu")
-async def medication_menu_callback(callback: CallbackQuery):
-    """Меню лекарств"""
-    child = db.get_child(callback.message.chat.id)
-    if not child:
-        await callback.answer("Сначала зарегистрируйте ребенка с помощью /register", show_alert=True)
+    active_feeding = db.get_active_feeding(chat_id)
+    if active_feeding:
+        await message.answer("Уже есть активное кормление!")
         return
     
-    await callback.message.edit_text(
-        f"💊 Калькулятор дозировок лекарств\n\n"
-        f"👶 Ребенок: {child['first_name']}\n\n"
-        "Выберите препарат для расчета дозировки:",
-        reply_markup=types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    types.InlineKeyboardButton(text="💊 Парацетамол", callback_data="med_paracetamol"),
-                    types.InlineKeyboardButton(text="💊 Ибупрофен", callback_data="med_ibuprofen")
-                ],
-                [
-                    types.InlineKeyboardButton(text="🔙 В главное меню", callback_data="main_menu")
-                ]
-            ]
-        )
-    )
-    await callback.answer()
-
-@router.callback_query(F.data.in_(["med_paracetamol", "med_ibuprofen"]))
-async def medication_calc_callback(callback: CallbackQuery, state: FSMContext):
-    """Расчет лекарств"""
-    medication_map = {
-        "med_paracetamol": "Парацетамол",
-        "med_ibuprofen": "Ибупрофен"
-    }
+    feeding_id = db.start_feeding(chat_id, child['id'])
     
-    medication = medication_map[callback.data]
-    await state.update_data(medication=medication)
+    # Получаем дневную статистику
+    daily_stats = db.get_daily_feeding_stats(child['id'])
+    daily_count = daily_stats['feedings_count'] if daily_stats else 0
+    daily_total = daily_stats['total_ml'] if daily_stats else 0
     
-    await callback.message.edit_text(
-        f"💊 {medication}\n\n"
-        "Введите вес ребенка в килограммах (например: 8.5):\n\n"
-        "Для отмены нажмите ❌ Отмена",
-        reply_markup=get_cancel_keyboard()
+    text = (
+        f"🍼 Кормление начато!\n\n"
+        f"👶 Ребенок: {child['first_name']}\n"
+        f"⏱️ Начало: {get_moscow_time().strftime('%H:%M')}\n"
+        f"🍶 Съедено сейчас: 0 мл\n"
+        f"📊 За сегодня: {daily_count} кормлений, всего {daily_total} мл\n\n"
+        "Добавляйте съеденное по мере кормления:"
     )
-    await state.set_state(MedicationTracking.waiting_for_weight_for_med)
-    await callback.answer()
+    
+    await message.answer(text, reply_markup=get_feeding_control_keyboard())
 
-@router.message(MedicationTracking.waiting_for_weight_for_med)
-async def process_medication_weight(message: Message, state: FSMContext):
+@router.message(Command("add_eaten"))
+async def add_eaten_cmd(message: Message):
+    """Команда для добавления съеденного количества"""
+    chat_id = message.chat.id
+    feeding = db.get_active_feeding(chat_id)
+    
+    if not feeding:
+        await message.answer("Нет активного кормления!")
+        return
+    
+    # Получаем количество из команды
     try:
-        weight_kg = float(message.text)
-        if 2 <= weight_kg <= 30:  # Реалистичный диапазон для ребенка
-            data = await state.get_data()
-            medication = data['medication']
-            
-            dose_info = calculate_medication_dose(weight_kg, medication)
-            
-            text = f"💊 Расчет дозировки\n\n"
-            text += f"👶 Вес ребенка: {weight_kg} кг\n"
-            text += f"💊 Препарат: {medication}\n\n"
-            text += dose_info
-            
-            # Дополнительные предупреждения
-            text += "\n\n⚠️ ВАЖНО:\n"
-            text += "• Перед применением проконсультируйтесь с врачом\n"
-            text += "• Не превышайте рекомендованные дозы\n"
-            text += "• При сохранении температуры более 3 дней - к врачу\n"
-            text += "• При аллергических реакциях прекратить прием\n"
-            
-            await message.answer(text)
-            await message.answer("🏠 Главное меню\nВыберите раздел:", reply_markup=get_main_menu_keyboard())
-            await state.clear()
-        else:
-            await message.answer("Введите вес от 2 до 30 кг:")
+        args = message.text.split()
+        if len(args) < 2:
+            await message.answer("Использование: /add_eaten [количество в мл]\nНапример: /add_eaten 50")
+            return
+        
+        eaten_ml = int(args[1])
+        if eaten_ml <= 0 or eaten_ml > 500:
+            await message.answer("Введите количество от 1 до 500 мл!")
+            return
+        
+        db.add_eaten_ml(feeding['id'], eaten_ml)
+        
+        child = db.get_child(chat_id)
+        total_eaten = (feeding['total_eaten_ml'] or 0) + eaten_ml
+        
+        # Получаем дневную статистику
+        daily_stats = db.get_daily_feeding_stats(child['id'])
+        daily_count = daily_stats['feedings_count'] if daily_stats else 0
+        daily_total = daily_stats['total_ml'] if daily_stats else 0
+        
+        text = (
+            f"✅ Добавлено {eaten_ml} мл\n\n"
+            f"👶 Ребенок: {child['first_name']}\n"
+            f"🍶 Съедено сейчас: {total_eaten} мл\n"
+            f"📊 За сегодня: {daily_count} кормлений, всего {daily_total} мл"
+        )
+        
+        await message.answer(text)
+        
     except ValueError:
-        await message.answer("Введите число (например: 8.5):")
+        await message.answer("Введите число (например: /add_eaten 50)")
 
-# --- Обработчики экстренной помощи ---
-@router.callback_query(F.data == "emergency_help")
-async def emergency_help_callback(callback: CallbackQuery):
-    """Экстренная помощь"""
+@router.message(Command("finish"))
+async def finish_cmd(message: Message):
+    """Команда для завершения кормления"""
+    chat_id = message.chat.id
+    feeding = db.get_active_feeding(chat_id)
+    
+    if not feeding:
+        await message.answer("Нет активного кормления!")
+        return
+    
+    db.finish_feeding(feeding['id'])
+    
+    child = db.get_child(chat_id)
+    start_time = datetime.fromisoformat(feeding['start_time'])
+    end_time = get_moscow_time()
+    duration = end_time - start_time
+    
+    total_duration_seconds = int(duration.total_seconds()) - (feeding['total_pause_duration'] or 0)
+    
+    # Получаем дневную статистику
+    daily_stats = db.get_daily_feeding_stats(child['id'])
+    daily_count = daily_stats['feedings_count'] if daily_stats else 0
+    daily_total = daily_stats['total_ml'] if daily_stats else 0
+
+    # Получаем список всех кормлений за сегодня
+    today_feedings = db.get_today_feedings(child['id'])
+    
+    text = (
+        f"✅ Кормление завершено!\n\n"
+        f"👶 Ребенок: {child['first_name']}\n"
+        f"⏱️ Начало: {start_time.strftime('%H:%M')}\n"
+        f"⏱️ Конец: {end_time.strftime('%H:%M')}\n"
+        f"⏳ Длительность: {format_duration(total_duration_seconds)}\n"
+        f"🍶 Съедено: {feeding['total_eaten_ml'] or 0} мл\n"
+        f"📊 За сегодня: {daily_count} кормлений, всего {daily_total} мл"
+    )
+    
+    if today_feedings:
+        text += "\n\n📋 Кормления за сегодня:\n"
+        for f in today_feedings:
+            text += f"  {f['start_time']} - {f['end_time']}: {f['total_eaten_ml']} мл\n"
+    
+    if feeding['prepared_ml']:
+        text += f"\n🍶 Приготовлено: {feeding['prepared_ml']} мл"
+    
+    await message.answer(text)
+    await message.answer("🏠 Главное меню\nВыберите раздел:", reply_markup=get_main_menu_keyboard())
+
+@router.message(Command("reset_feeding"))
+async def reset_feeding_cmd(message: Message):
+    """Команда для сброса активного кормления"""
+    chat_id = message.chat.id
+    deleted_count = db.delete_active_feeding(chat_id)
+    
+    if deleted_count > 0:
+        await message.answer(f"✅ Удалено {deleted_count} активных кормлений")
+    else:
+        await message.answer("⚠️ Активных кормлений не найдено")
+
+@router.message(Command("cancel"))
+async def cancel_cmd(message: Message, state: FSMContext):
+    """Команда для отмены текущего действия"""
+    current_state = await state.get_state()
+    if current_state is None:
+        await message.answer("Нет активных действий для отмены")
+        return
+    
+    await state.clear()
+    await message.answer(
+        "❌ Действие отменено",
+        reply_markup=get_main_menu_keyboard()
+    )
+
+# --- Обработчики кормления через callback ---
+@router.callback_query(F.data == "start_feeding")
+async def start_feeding_callback(callback: CallbackQuery):
+    if not callback.message:
+        await callback.answer()
+        return
+        
+    chat_id = callback.message.chat.id
+    child = db.get_child(chat_id)
+    
+    if not child:
+        await callback.answer("Сначала зарегистрируйте ребенка с помощью /register", show_alert=True)
+        return
+    
+    active_feeding = db.get_active_feeding(chat_id)
+    if active_feeding:
+        await callback.answer("Уже есть активное кормление!", show_alert=True)
+        return
+    
+    feeding_id = db.start_feeding(chat_id, child['id'])
+    
+    # Получаем дневную статистику
+    daily_stats = db.get_daily_feeding_stats(child['id'])
+    daily_count = daily_stats['feedings_count'] if daily_stats else 0
+    daily_total = daily_stats['total_ml'] if daily_stats else 0
+    
+    text = (
+        f"🍼 Кормление начато!\n\n"
+        f"👶 Ребенок: {child['first_name']}\n"
+        f"⏱️ Начало: {get_moscow_time().strftime('%H:%M')}\n"
+        f"🍶 Съедено сейчас: 0 мл\n"
+        f"📊 За сегодня: {daily_count} кормлений, всего {daily_total} мл\n\n"
+        "Добавляйте съеденное по мере кормления:"
+    )
+    
     await callback.message.edit_text(
-        get_emergency_info(),
-        parse_mode="Markdown",
+        text,
+        reply_markup=get_feeding_control_keyboard()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "finish_feeding")
+async def finish_feeding_callback(callback: CallbackQuery):
+    if not callback.message:
+        await callback.answer()
+        return
+        
+    chat_id = callback.message.chat.id
+    feeding = db.get_active_feeding(chat_id)
+    
+    if not feeding:
+        await callback.answer("Нет активного кормления!", show_alert=True)
+        return
+    
+    db.finish_feeding(feeding['id'])
+    
+    child = db.get_child(chat_id)
+    start_time = datetime.fromisoformat(feeding['start_time'])
+    end_time = get_moscow_time()
+    duration = end_time - start_time
+    
+    total_duration_seconds = int(duration.total_seconds()) - (feeding['total_pause_duration'] or 0)
+    
+    # Получаем дневную статистику
+    daily_stats = db.get_daily_feeding_stats(child['id'])
+    daily_count = daily_stats['feedings_count'] if daily_stats else 0
+    daily_total = daily_stats['total_ml'] if daily_stats else 0
+
+    # Получаем список всех кормлений за сегодня
+    today_feedings = db.get_today_feedings(child['id'])
+    
+    text = (
+        f"✅ Кормление завершено!\n\n"
+        f"👶 Ребенок: {child['first_name']}\n"
+        f"⏱️ Начало: {start_time.strftime('%H:%M')}\n"
+        f"⏱️ Конец: {end_time.strftime('%H:%M')}\n"
+        f"⏳ Длительность: {format_duration(total_duration_seconds)}\n"
+        f"🍶 Съедено: {feeding['total_eaten_ml'] or 0} мл\n"
+        f"📊 За сегодня: {daily_count} кормлений, всего {daily_total} мл"
+    )
+    
+    if today_feedings:
+        text += "\n\n📋 Кормления за сегодня:\n"
+        for f in today_feedings:
+            text += f"  {f['start_time']} - {f['end_time']}: {f['total_eaten_ml']} мл\n"
+    
+    if feeding['prepared_ml']:
+        text += f"\n🍶 Приготовлено: {feeding['prepared_ml']} мл"
+    
+    await callback.message.edit_text(
+        text,
         reply_markup=types.InlineKeyboardMarkup(
             inline_keyboard=[
-                [types.InlineKeyboardButton(text="🔙 В главное меню", callback_data="main_menu")]
+                [types.InlineKeyboardButton(text="🏠 В главное меню", callback_data="main_menu")]
+            ]
+        )
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "cancel_feeding")
+async def cancel_feeding_callback(callback: CallbackQuery):
+    if not callback.message:
+        await callback.answer()
+        return
+        
+    chat_id = callback.message.chat.id
+    feeding = db.get_active_feeding(chat_id)
+    
+    if not feeding:
+        await callback.answer("Нет активного кормления!", show_alert=True)
+        return
+    
+    with sqlite3.connect(db.db_name) as conn:
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM feedings WHERE id = ?', (feeding['id'],))
+    
+    await callback.message.edit_text(
+        "❌ Кормление отменено",
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [types.InlineKeyboardButton(text="🏠 В главное меню", callback_data="main_menu")]
             ]
         )
     )
@@ -1904,11 +1690,17 @@ async def add_eaten_quick_callback(callback: CallbackQuery):
         
     total_eaten = (feeding['total_eaten_ml'] or 0) + eaten_ml
     
+    # Получаем дневную статистику
+    daily_stats = db.get_daily_feeding_stats(child['id'])
+    daily_count = daily_stats['feedings_count'] if daily_stats else 0
+    daily_total = daily_stats['total_ml'] if daily_stats else 0
+    
     text = (
         f"🍼 Кормление продолжается\n\n"
         f"👶 Ребенок: {child['first_name']}\n"
         f"⏱️ Начало: {datetime.fromisoformat(feeding['start_time']).strftime('%H:%M')}\n"
-        f"🍶 Всего съедено: {total_eaten} мл\n\n"
+        f"🍶 Съедено сейчас: {total_eaten} мл\n"
+        f"📊 За сегодня: {daily_count} кормлений, всего {daily_total} мл\n\n"
         f"✅ Добавлено: {eaten_ml} мл\n\n"
         "Продолжайте кормить или завершите кормление"
     )
@@ -1970,11 +1762,17 @@ async def process_custom_amount(message: Message, state: FSMContext):
             
         total_eaten = (feeding['total_eaten_ml'] or 0) + eaten_ml
         
+        # Получаем дневную статистику
+        daily_stats = db.get_daily_feeding_stats(child['id'])
+        daily_count = daily_stats['feedings_count'] if daily_stats else 0
+        daily_total = daily_stats['total_ml'] if daily_stats else 0
+        
         text = (
             f"🍼 Кормление продолжается\n\n"
             f"👶 Ребенок: {child['first_name']}\n"
             f"⏱️ Начало: {datetime.fromisoformat(feeding['start_time']).strftime('%H:%M')}\n"
-            f"🍶 Всего съедено: {total_eaten} мл\n\n"
+            f"🍶 Съедено сейчас: {total_eaten} мл\n"
+            f"📊 За сегодня: {daily_count} кормлений, всего {daily_total} мл\n\n"
             f"✅ Добавлено: {eaten_ml} мл\n\n"
             "Продолжайте кормить или завершите кормление"
         )
@@ -1984,674 +1782,6 @@ async def process_custom_amount(message: Message, state: FSMContext):
         
     except ValueError:
         await message.answer("Пожалуйста, введите число (например: 75):")
-
-# --- Заглушки для остальных callback-данных ---
-@router.callback_query(F.data.in_([
-    "temp_tracking", "vaccination_info", "doctor_visit", "medical_record",
-    "age_tips", "dev_games", "growth_chart", "gymnastics", "bath_time", "walks",
-    "general_stats", "feeding_stats", "weight_chart", "height_chart", 
-    "monthly_report", "daily_report", "sleep_history"
-]))
-async def placeholder_callback(callback: CallbackQuery):
-    """Заглушка для пока не реализованных функций"""
-    await callback.answer("Эта функция скоро будет доступна! ⏳", show_alert=True)
-
-# --- Команды бота (обновленные) ---
-@router.message(CommandStart())
-async def start_cmd(message: Message):
-    child = db.get_child(message.chat.id)
-    
-    text = "👶 Бот для отслеживания развития ребенка!\n\n"
-    
-    if child:
-        years, months, days = calculate_age(datetime.strptime(child['birth_date'], "%Y-%m-%d"))
-        text += f"👶 Ребенок: {child['first_name']} {child['last_name'] if child['last_name'] else ''}\n"
-        text += f"📅 Дата рождения: {child['birth_date']}\n"
-        text += f"🎂 Возраст: {years} лет, {months} месяцев, {days} дней\n\n"
-        
-    await message.answer(
-        text,
-        parse_mode="Markdown"
-    )
-    
-    await message.answer(
-        "🏠 Главное меню\nВыберите раздел:",
-        reply_markup=get_main_menu_keyboard()
-    )
-
-@router.message(Command("menu"))
-async def menu_cmd(message: Message):
-    """Команда для вызова главного меню"""
-    await message.answer(
-        "🏠 Главное меню\nВыберите раздел:",
-        reply_markup=get_main_menu_keyboard()
-    )
-
-@router.message(Command("help"))
-async def help_cmd(message: Message):
-    help_text = """📋 Доступные команды и функции:
-
-Основные:
-/start - Главное меню
-/register - Регистрация ребенка
-/child_info - Информация о ребенке
-/params - Внести параметры роста/веса
-/stats - Статистика развития
-/menu - Главное меню (inline)
-/help - Справка
-
-Новые функции для родителей:
-• 💤 Сон - Трекер сна
-• 🌞 Бодрствование - Трекер времени бодрствования
-• 🩲 Подгузник - Трекер смены подгузников
-• 📝 Заметка - Журнал для записей
-• 🗓️ Советы - Рекомендации по возрасту
-• 🚨 Помощь - Экстренная информация
-• 💊 Лекарства - Калькулятор дозировок
-• ✅ Чек-лист - Ежедневные задачи
-• 🎮 Игры - Развивающие занятия
-
-Для кормлений:
-/feeding - Начать кормление
-/add_eaten [количество] - Добавить съеденное (например: /add_eaten 50)
-/pause - Приостановить кормление
-/resume - Продолжить кормление
-/finish - Завершить кормление
-/reset_feeding - Сбросить активное кормление (при багах)
-
-Для отмены ввода:
-/cancel - Отмена текущего действия"""
-    
-    await message.answer(help_text)
-
-# --- Обработчики команд кормления ---
-@router.message(Command("feeding"))
-async def feeding_cmd(message: Message):
-    """Команда для начала кормления"""
-    chat_id = message.chat.id
-    child = db.get_child(chat_id)
-    
-    if not child:
-        await message.answer("Сначала зарегистрируйте ребенка с помощью /register")
-        return
-    
-    active_feeding = db.get_active_feeding(chat_id)
-    if active_feeding:
-        await message.answer("Уже есть активное кормление!")
-        return
-    
-    feeding_id = db.start_feeding(chat_id, child['id'])
-    
-    text = (
-        f"🍼 Кормление начато!\n\n"
-        f"👶 Ребенок: {child['first_name']}\n"
-        f"⏱️ Начало: {datetime.now().strftime('%H:%M')}\n"
-        f"🍶 Съедено: 0 мл\n\n"
-        "Добавляйте съеденное по мере кормления:"
-    )
-    
-    await message.answer(text, reply_markup=get_feeding_control_keyboard())
-
-@router.message(Command("add_eaten"))
-async def add_eaten_cmd(message: Message):
-    """Команда для добавления съеденного количества"""
-    chat_id = message.chat.id
-    feeding = db.get_active_feeding(chat_id)
-    
-    if not feeding:
-        await message.answer("Нет активного кормления!")
-        return
-    
-    # Получаем количество из команды
-    try:
-        args = message.text.split()
-        if len(args) < 2:
-            await message.answer("Использование: /add_eaten [количество в мл]\nНапример: /add_eaten 50")
-            return
-        
-        eaten_ml = int(args[1])
-        if eaten_ml <= 0 or eaten_ml > 500:
-            await message.answer("Введите количество от 1 до 500 мл!")
-            return
-        
-        db.add_eaten_ml(feeding['id'], eaten_ml)
-        
-        child = db.get_child(chat_id)
-        total_eaten = (feeding['total_eaten_ml'] or 0) + eaten_ml
-        
-        text = (
-            f"✅ Добавлено {eaten_ml} мл\n\n"
-            f"👶 Ребенок: {child['first_name']}\n"
-            f"🍶 Всего съедено: {total_eaten} мл"
-        )
-        
-        await message.answer(text)
-        
-    except ValueError:
-        await message.answer("Введите число (например: /add_eaten 50)")
-
-@router.message(Command("pause"))
-async def pause_cmd(message: Message):
-    """Команда для паузы кормления"""
-    chat_id = message.chat.id
-    feeding = db.get_active_feeding(chat_id)
-    
-    if not feeding:
-        await message.answer("Нет активного кормления!")
-        return
-    
-    if feeding['is_paused']:
-        await message.answer("Кормление уже на паузе!")
-        return
-    
-    db.pause_feeding(feeding['id'])
-    
-    text = (
-        f"⏸️ Кормление приостановлено\n\n"
-        f"👶 Ребенок: {db.get_child(chat_id)['first_name']}\n"
-        f"⏱️ На паузе с: {datetime.now().strftime('%H:%M')}\n"
-        f"🍶 Съедено: {feeding['total_eaten_ml'] or 0} мл\n\n"
-        "Когда ребенок будет готов продолжить, используйте /resume"
-    )
-    
-    await message.answer(text)
-
-@router.message(Command("resume"))
-async def resume_cmd(message: Message):
-    """Команда для продолжения кормления"""
-    chat_id = message.chat.id
-    feeding = db.get_active_feeding(chat_id)
-    
-    if not feeding or not feeding['is_paused']:
-        await message.answer("Нет кормления на паузе!")
-        return
-    
-    db.resume_feeding(feeding['id'])
-    
-    child = db.get_child(chat_id)
-    text = (
-        f"🍼 Кормление продолжено!\n\n"
-        f"👶 Ребенок: {child['first_name']}\n"
-        f"⏱️ Продолжено в: {datetime.now().strftime('%H:%M')}\n"
-        f"🍶 Съедено: {feeding['total_eaten_ml'] or 0} мл\n\n"
-        "Продолжайте кормить ребенка"
-    )
-    
-    await message.answer(text)
-
-@router.message(Command("finish"))
-async def finish_cmd(message: Message):
-    """Команда для завершения кормления"""
-    chat_id = message.chat.id
-    feeding = db.get_active_feeding(chat_id)
-    
-    if not feeding:
-        await message.answer("Нет активного кормления!")
-        return
-    
-    db.finish_feeding(feeding['id'])
-    
-    child = db.get_child(chat_id)
-    start_time = datetime.fromisoformat(feeding['start_time'])
-    end_time = datetime.now()
-    duration = end_time - start_time
-    
-    total_duration_seconds = int(duration.total_seconds()) - (feeding['total_pause_duration'] or 0)
-    
-    text = (
-        f"✅ Кормление завершено!\n\n"
-        f"👶 Ребенок: {child['first_name']}\n"
-        f"⏱️ Начало: {start_time.strftime('%H:%M')}\n"
-        f"⏱️ Конец: {end_time.strftime('%H:%M')}\n"
-        f"⏳ Длительность: {format_duration(total_duration_seconds)}\n"
-        f"⏸️ Пауз: {feeding['pauses_count'] or 0}\n"
-        f"🍶 Всего съедено: {feeding['total_eaten_ml'] or 0} мл"
-    )
-    
-    if feeding['prepared_ml']:
-        text += f"\n🍶 Приготовлено: {feeding['prepared_ml']} мл"
-    
-    await message.answer(text)
-
-@router.message(Command("reset_feeding"))
-async def reset_feeding_cmd(message: Message):
-    """Команда для сброса активного кормления"""
-    chat_id = message.chat.id
-    deleted_count = db.delete_active_feeding(chat_id)
-    
-    if deleted_count > 0:
-        await message.answer(f"✅ Удалено {deleted_count} активных кормлений")
-    else:
-        await message.answer("⚠️ Активных кормлений не найдено")
-
-@router.message(Command("cancel"))
-async def cancel_cmd(message: Message, state: FSMContext):
-    """Команда для отмены текущего действия"""
-    current_state = await state.get_state()
-    if current_state is None:
-        await message.answer("Нет активных действий для отмены")
-        return
-    
-    await state.clear()
-    await message.answer(
-        "❌ Действие отменено",
-        reply_markup=get_main_menu_keyboard()
-    )
-
-# --- Существующие обработчики (без изменений) ---
-@router.message(Command("register"))
-async def register_child_cmd(message: Message, state: FSMContext):
-    child = db.get_child(message.chat.id)
-    if child:
-        await message.answer("Ребенок уже зарегистрирован! Используйте /child_info для просмотра данных.")
-        return
-    await message.answer(
-        "Введите имя ребенка:\n\n"
-        "Для отмены нажмите ❌ Отмена",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(ChildRegistration.waiting_for_first_name)
-
-@router.message(ChildRegistration.waiting_for_first_name)
-async def process_first_name(message: Message, state: FSMContext):
-    await state.update_data(first_name=message.text)
-    await message.answer(
-        "Введите фамилию ребенка (или напишите '-' если нет):\n\n"
-        "Для отмены нажмите ❌ Отмена",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(ChildRegistration.waiting_for_last_name)
-
-@router.message(ChildRegistration.waiting_for_last_name)
-async def process_last_name(message: Message, state: FSMContext):
-    last_name = message.text if message.text != '-' else ''
-    await state.update_data(last_name=last_name)
-    await message.answer("Выберите пол ребенка:", reply_markup=get_gender_keyboard())
-    await state.set_state(ChildRegistration.waiting_for_gender)
-
-@router.callback_query(ChildRegistration.waiting_for_gender, F.data.startswith("gender_"))
-async def process_gender(callback: CallbackQuery, state: FSMContext):
-    gender = "М" if callback.data == "gender_m" else "Ж"
-    await state.update_data(gender=gender)
-    await callback.message.answer(
-        "Введите дату рождения в формате ДД.ММ.ГГГГ:\n\n"
-        "Для отмены нажмите ❌ Отмена",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(ChildRegistration.waiting_for_birth_date)
-    await callback.answer()
-
-@router.message(ChildRegistration.waiting_for_birth_date)
-async def process_birth_date(message: Message, state: FSMContext):
-    try:
-        birth_date = datetime.strptime(message.text, "%d.%m.%Y")
-        await state.update_data(birth_date=birth_date.strftime("%Y-%m-%d"))
-        await message.answer(
-            "Введите срок беременности (недели от 20 до 42):\n\n"
-            "Для отмены нажмите ❌ Отмена",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(ChildRegistration.waiting_for_gestation_weeks)
-    except ValueError:
-        await message.answer("Неверный формат даты. Введите в формате ДД.ММ.ГГГГ:")
-
-@router.message(ChildRegistration.waiting_for_gestation_weeks)
-async def process_gestation_weeks(message: Message, state: FSMContext):
-    try:
-        weeks = int(message.text)
-        if 20 <= weeks <= 42:
-            await state.update_data(gestation_weeks=weeks)
-            await message.answer(
-                "Введите дополнительные дни срока (0-6):\n\n"
-                "Для отмены нажмите ❌ Отмена",
-                reply_markup=get_cancel_keyboard()
-            )
-            await state.set_state(ChildRegistration.waiting_for_gestation_days)
-        else:
-            await message.answer("Введите число от 20 до 42:")
-    except ValueError:
-        await message.answer("Введите число от 20 до 42:")
-
-@router.message(ChildRegistration.waiting_for_gestation_days)
-async def process_gestation_days(message: Message, state: FSMContext):
-    try:
-        days = int(message.text)
-        if 0 <= days <= 6:
-            await state.update_data(gestation_days=days)
-            await message.answer(
-                "Введите вес при рождении (в граммах, например: 3500):\n\n"
-                "Для отмены нажмите ❌ Отмена",
-                reply_markup=get_cancel_keyboard()
-            )
-            await state.set_state(ChildRegistration.waiting_for_birth_weight)
-        else:
-            await message.answer("Введите число от 0 до 6:")
-    except ValueError:
-        await message.answer("Введите число от 0 до 6:")
-
-@router.message(ChildRegistration.waiting_for_birth_weight)
-async def process_birth_weight(message: Message, state: FSMContext):
-    try:
-        weight = float(message.text)
-        if 500 <= weight <= 6000:
-            await state.update_data(birth_weight=weight)
-            await message.answer(
-                "Введите рост при рождении (в см, например: 52):\n\n"
-                "Для отмены нажмите ❌ Отмена",
-                reply_markup=get_cancel_keyboard()
-            )
-            await state.set_state(ChildRegistration.waiting_for_birth_height)
-        else:
-            await message.answer("Введите вес от 500 до 6000 грамм:")
-    except ValueError:
-        await message.answer("Введите число (например: 3500):")
-
-@router.message(ChildRegistration.waiting_for_birth_height)
-async def process_birth_height(message: Message, state: FSMContext):
-    try:
-        height = int(message.text)
-        if 30 <= height <= 70:
-            data = await state.get_data()
-            data['birth_height'] = height
-            
-            child_id = db.register_child(message.chat.id, data)
-            
-            if child_id:
-                years, months, days = calculate_age(datetime.strptime(data['birth_date'], "%Y-%m-%d"))
-                
-                text = (
-                    "✅ Ребенок успешно зарегистрирован!\n\n"
-                    f"👶 Имя: {data['first_name']} {data['last_name'] if data['last_name'] else ''}\n"
-                    f"🚻 Пол: {data['gender']}\n"
-                    f"📅 Дата рождения: {data['birth_date']}\n"
-                    f"🎂 Возраст: {years} лет, {months} месяцев, {days} дней\n"
-                    f"🤰 Срок беременности: {data['gestation_weeks']} недель {data['gestation_days']} дней\n"
-                    f"⚖️ Вес при рождении: {data['birth_weight']} г\n"
-                    f"📏 Рост при рождении: {data['birth_height']} см\n\n"
-                    "Теперь вы можете начать отслеживать кормления и параметры развития."
-                )
-                
-                await message.answer(text)
-                await message.answer("🏠 Главное меню\nВыберите раздел:", reply_markup=get_main_menu_keyboard())
-                await state.clear()
-                
-                db.add_measurement(child_id, data['birth_weight'], data['birth_height'])
-            else:
-                await message.answer("Ошибка регистрации ребенка. Попробуйте еще раз.")
-        else:
-            await message.answer("Введите рост от 30 до 70 см:")
-    except ValueError:
-        await message.answer("Введите число (например: 52):")
-
-@router.message(Command("child_info"))
-async def child_info_cmd(message: Message):
-    child = db.get_child(message.chat.id)
-    if not child:
-        await message.answer("Ребенок не зарегистрирован. Используйте /register")
-        return
-    
-    years, months, days = calculate_age(datetime.strptime(child['birth_date'], "%Y-%m-%d"))
-    last_measurement = db.get_last_measurement(child['id'])
-    
-    text = (
-        f"👶 Информация о ребенке\n\n"
-        f"👶 Ребенок: {child['first_name']} {child['last_name'] if child['last_name'] else ''}\n"
-        f"🚻 Пол: {child['gender']}\n"
-        f"📅 Дата рождения: {child['birth_date']}\n"
-        f"🎂 Возраст: {years} лет, {months} месяцев, {days} дней\n"
-        f"🤰 Срок беременности: {child['gestation_weeks']} нед. {child['gestation_days']} дн.\n"
-        f"⚖️ Вес при рождении: {child['birth_weight']} г\n"
-        f"📏 Рост при рождении: {child['birth_height']} см\n"
-    )
-    
-    if last_measurement:
-        weight_gain = last_measurement['weight'] - child['birth_weight']
-        height_gain = last_measurement['height'] - child['birth_height']
-        
-        text += (
-            f"\n📊 Последние измерения:\n"
-            f"⚖️ Вес: {last_measurement['weight']} г (+{weight_gain} г)\n"
-            f"📏 Рост: {last_measurement['height']} см (+{height_gain} см)\n"
-            f"📅 Дата: {last_measurement['measurement_date']}\n"
-            f"🎂 Возраст на момент измерения: {last_measurement['age_days']} дней"
-        )
-    
-    await message.answer(text)
-    await message.answer("🏠 Главное меню\nВыберите раздел:", reply_markup=get_main_menu_keyboard())
-
-@router.message(Command("params"))
-async def params_cmd(message: Message, state: FSMContext):
-    child = db.get_child(message.chat.id)
-    if not child:
-        await message.answer("Сначала зарегистрируйте ребенка с помощью /register")
-        return
-    
-    await message.answer(
-        "Введите текущий вес ребенка в граммах (например: 4500):\n\n"
-        "Для отмены нажмите ❌ Отмена",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(UpdateParams.waiting_for_weight)
-
-@router.message(UpdateParams.waiting_for_weight)
-async def process_weight(message: Message, state: FSMContext):
-    try:
-        weight = float(message.text)
-        if 500 <= weight <= 20000:
-            await state.update_data(weight=weight)
-            await message.answer(
-                "Введите текущий рост в см (например: 60):\n\n"
-                "Для отмены нажмите ❌ Отмена",
-                reply_markup=get_cancel_keyboard()
-            )
-            await state.set_state(UpdateParams.waiting_for_height)
-        else:
-            await message.answer("Введите вес от 500 до 20000 грамм:")
-    except ValueError:
-        await message.answer("Введите число (например: 4500):")
-
-@router.message(UpdateParams.waiting_for_height)
-async def process_height(message: Message, state: FSMContext):
-    try:
-        height = int(message.text)
-        if 30 <= height <= 120:
-            child = db.get_child(message.chat.id)
-            if not child:
-                await message.answer("Ребенок не найден!")
-                await state.clear()
-                return
-                
-            data = await state.get_data()
-            
-            db.add_measurement(child['id'], data['weight'], height)
-            
-            last_measurement = db.get_last_measurement(child['id'])
-            
-            text = "✅ Параметры успешно сохранены!\n\n"
-            if last_measurement:
-                text += (
-                    f"⚖️ Вес: {data['weight']} г\n"
-                    f"📏 Рост: {height} см\n"
-                    f"📅 Дата измерения: {datetime.now().strftime('%d.%m.%Y')}"
-                )
-            
-            await message.answer(text)
-            await message.answer("🏠 Главное меню\nВыберите раздел:", reply_markup=get_main_menu_keyboard())
-            await state.clear()
-        else:
-            await message.answer("Введите рост от 30 до 120 см:")
-    except ValueError:
-        await message.answer("Введите число (например: 60):")
-
-# --- Обработчики кормления через callback ---
-@router.callback_query(F.data == "start_feeding")
-async def start_feeding_callback(callback: CallbackQuery):
-    if not callback.message:
-        await callback.answer()
-        return
-        
-    chat_id = callback.message.chat.id
-    child = db.get_child(chat_id)
-    
-    if not child:
-        await callback.answer("Сначала зарегистрируйте ребенка с помощью /register", show_alert=True)
-        return
-    
-    active_feeding = db.get_active_feeding(chat_id)
-    if active_feeding:
-        await callback.answer("Уже есть активное кормление!", show_alert=True)
-        return
-    
-    feeding_id = db.start_feeding(chat_id, child['id'])
-    
-    text = (
-        f"🍼 Кормление начато!\n\n"
-        f"👶 Ребенок: {child['first_name']}\n"
-        f"⏱️ Начало: {datetime.now().strftime('%H:%M')}\n"
-        f"🍶 Съедено: 0 мл\n\n"
-        "Добавляйте съеденное по мере кормления:"
-    )
-    
-    await callback.message.edit_text(
-        text,
-        reply_markup=get_feeding_control_keyboard()
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "pause_feeding")
-async def pause_feeding_callback(callback: CallbackQuery):
-    if not callback.message:
-        await callback.answer()
-        return
-        
-    chat_id = callback.message.chat.id
-    feeding = db.get_active_feeding(chat_id)
-    
-    if not feeding:
-        await callback.answer("Нет активного кормления!", show_alert=True)
-        return
-    
-    if feeding['is_paused']:
-        await callback.answer("Кормление уже на паузе!", show_alert=True)
-        return
-    
-    db.pause_feeding(feeding['id'])
-    
-    text = (
-        f"⏸️ Кормление приостановлено\n\n"
-        f"👶 Ребенок: {db.get_child(chat_id)['first_name']}\n"
-        f"⏱️ На паузе с: {datetime.now().strftime('%H:%M')}\n"
-        f"🍶 Съедено: {feeding['total_eaten_ml'] or 0} мл\n\n"
-        "Когда ребенок будет готов продолжить, нажмите '▶️ Продолжить'"
-    )
-    
-    await callback.message.edit_text(
-        text,
-        reply_markup=get_paused_feeding_keyboard()
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "resume_feeding")
-async def resume_feeding_callback(callback: CallbackQuery):
-    if not callback.message:
-        await callback.answer()
-        return
-        
-    chat_id = callback.message.chat.id
-    feeding = db.get_active_feeding(chat_id)
-    
-    if not feeding or not feeding['is_paused']:
-        await callback.answer("Нет кормления на паузе!", show_alert=True)
-        return
-    
-    db.resume_feeding(feeding['id'])
-    
-    child = db.get_child(chat_id)
-    text = (
-        f"🍼 Кормление продолжено!\n\n"
-        f"👶 Ребенок: {child['first_name']}\n"
-        f"⏱️ Продолжено в: {datetime.now().strftime('%H:%M')}\n"
-        f"🍶 Съедено: {feeding['total_eaten_ml'] or 0} мл\n\n"
-        "Продолжайте кормить ребенка"
-    )
-    
-    await callback.message.edit_text(
-        text,
-        reply_markup=get_feeding_control_keyboard()
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "finish_feeding")
-async def finish_feeding_callback(callback: CallbackQuery):
-    if not callback.message:
-        await callback.answer()
-        return
-        
-    chat_id = callback.message.chat.id
-    feeding = db.get_active_feeding(chat_id)
-    
-    if not feeding:
-        await callback.answer("Нет активного кормления!", show_alert=True)
-        return
-    
-    db.finish_feeding(feeding['id'])
-    
-    child = db.get_child(chat_id)
-    start_time = datetime.fromisoformat(feeding['start_time'])
-    end_time = datetime.now()
-    duration = end_time - start_time
-    
-    total_duration_seconds = int(duration.total_seconds()) - (feeding['total_pause_duration'] or 0)
-    
-    text = (
-        f"✅ Кормление завершено!\n\n"
-        f"👶 Ребенок: {child['first_name']}\n"
-        f"⏱️ Начало: {start_time.strftime('%H:%M')}\n"
-        f"⏱️ Конец: {end_time.strftime('%H:%M')}\n"
-        f"⏳ Длительность: {format_duration(total_duration_seconds)}\n"
-        f"⏸️ Пауз: {feeding['pauses_count'] or 0}\n"
-        f"🍶 Всего съедено: {feeding['total_eaten_ml'] or 0} мл"
-    )
-    
-    if feeding['prepared_ml']:
-        text += f"\n🍶 Приготовлено: {feeding['prepared_ml']} мл"
-    
-    await callback.message.edit_text(
-        text,
-        reply_markup=types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [types.InlineKeyboardButton(text="🏠 В главное меню", callback_data="main_menu")]
-            ]
-        )
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "cancel_feeding")
-async def cancel_feeding_callback(callback: CallbackQuery):
-    if not callback.message:
-        await callback.answer()
-        return
-        
-    chat_id = callback.message.chat.id
-    feeding = db.get_active_feeding(chat_id)
-    
-    if not feeding:
-        await callback.answer("Нет активного кормления!", show_alert=True)
-        return
-    
-    with sqlite3.connect(db.db_name) as conn:
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM feedings WHERE id = ?', (feeding['id'],))
-    
-    await callback.message.edit_text(
-        "❌ Кормление отменено",
-        reply_markup=types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [types.InlineKeyboardButton(text="🏠 В главное меню", callback_data="main_menu")]
-            ]
-        )
-    )
-    await callback.answer()
 
 # --- Обработчики параметров через callback ---
 @router.callback_query(F.data == "update_params")
@@ -2726,13 +1856,22 @@ async def show_stats_dialog(message: Message):
     
     text = f"📊 Статистика для {child['first_name']}\n\n"
     
+    # Детальные кормления за сегодня
+    today_feedings = db.get_today_feedings(child['id'])
+    daily_stats = db.get_daily_feeding_stats(child['id'])
+    if today_feedings:
+        text += "🍼 Кормления сегодня:\n"
+        for f in today_feedings:
+            text += f"  {f['start_time']} - {f['end_time']}: {f['total_eaten_ml']} мл\n"
+        text += f"  Всего за сегодня: {daily_stats['total_ml']} мл ({daily_stats['feedings_count']} корм.)\n\n"
+    else:
+        text += "🍼 Сегодня кормлений не было.\n\n"
+    
     if feedings_stats:
         text += "🍼 Кормления за последние 7 дней:\n"
         for stat in feedings_stats:
             text += f"  📅 {stat['feeding_date']}: {stat['feedings_count']} кормлений, {stat['total_ml'] or 0} мл\n"
         text += "\n"
-    else:
-        text += "😴 Нет данных о кормлениях за последние 7 дней\n\n"
     
     if measurements:
         text += "📈 Динамика параметров:\n"
@@ -2741,7 +1880,7 @@ async def show_stats_dialog(message: Message):
             if m['recorded_at']:
                 try:
                     if isinstance(m['recorded_at'], str):
-                        dt = datetime.fromisoformat(m['recorded_at'].replace('Z', '+00:00'))
+                        dt = datetime.fromisoformat(m['recorded_at'])
                         recorded_time = f" ({dt.strftime('%H:%M')})"
                 except:
                     pass
@@ -2835,7 +1974,7 @@ async def check_reminders():
                 child = db.get_child(reminder['chat_id'])
                 if child:
                     birth_date = datetime.strptime(child['birth_date'], "%Y-%m-%d")
-                    age_days = (datetime.now().date() - birth_date.date()).days
+                    age_days = (get_moscow_time().date() - birth_date.date()).days
                     
                     if age_days <= 14:
                         frequency_text = "ежедневно"
@@ -2876,4 +2015,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
