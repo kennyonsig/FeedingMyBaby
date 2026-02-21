@@ -27,10 +27,10 @@ logger = logging.getLogger(__name__)
 # Конфигурация
 MOSCOW_TZ = pytz.timezone('Europe/Moscow')
 DB_NAME = 'baby_tracker.db'
-TOKEN = tokens.TOKEN_TEST
+API_TOKEN = os.getenv('API_TOKEN')
 
 # Инициализация бота
-bot = Bot(token=TOKEN)
+bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
@@ -2015,3 +2015,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
