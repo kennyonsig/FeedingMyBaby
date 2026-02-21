@@ -1,7 +1,7 @@
 import os
 import logging
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Any, Union
+from typing import Optional, Dict, List, Any, Union, Tuple
 from dataclasses import dataclass
 from contextlib import contextmanager
 import sqlite3
@@ -15,7 +15,6 @@ from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-
 
 # Настройка логирования
 logging.basicConfig(
@@ -35,6 +34,7 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
+
 class ChildRegistration(StatesGroup):
     waiting_for_first_name = State()
     waiting_for_last_name = State()
@@ -2015,5 +2015,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
